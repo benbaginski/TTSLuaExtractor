@@ -1,14 +1,10 @@
 ﻿// Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.IO;
-using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-
+using System;
+using System.IO;
+using System.Text.RegularExpressions;
 
 namespace TTSLuaExtractor
 {
@@ -40,7 +36,7 @@ namespace TTSLuaExtractor
                 return;
             }
 
-            if ( args[0] == "extract" )
+            if (args[0] == "extract")
             {
                 if (args.Length != 3)
                 {
@@ -174,11 +170,12 @@ namespace TTSLuaExtractor
 
                 string inputFullPath = Path.Combine(inputFolder, inputFile);
                 FileInfo fi = new FileInfo(inputFullPath);
-                if( fi.Exists )
+                if (fi.Exists)
                 {
                     Console.WriteLine($"Reading from {inputFullPath}");
                     string lua = File.ReadAllText(inputFullPath);
                     lua = UncompressIncludes(lua, "", includePath);
+                    lua = UncompressRequires(lua, "", includePath);
                     obj.LuaScript = lua;
                 }
                 else
@@ -223,7 +220,7 @@ namespace TTSLuaExtractor
                     dt = fi.LastWriteTime;
                     latestFile = jsonFile;
                 }
-                
+
             }
 
             return latestFile;
@@ -269,13 +266,13 @@ namespace TTSLuaExtractor
         }
 
         static string CompressIncludes(string lua)
-        {            
-            while(true) // Keep looking for #includes in this file until there's no more to be found
+        {
+            while (true) // Keep looking for #includes in this file until there's no more to be found
             {
                 // Looking for something like 
                 // ----#include shared/utils
                 int firstIncludeIndex = lua.IndexOf("----#include ");
-                if(firstIncludeIndex == -1)
+                if (firstIncludeIndex == -1)
                 {
                     break;
                 }
@@ -292,9 +289,50 @@ namespace TTSLuaExtractor
                 // Everything in-between can be deleted and collapsed
                 // into a new line such as
                 // #include shared/utils
-                int nextIncludeIndex = lua.IndexOf(originalIncludeLine, firstIncludeIndexEOL+1);
+                int nextIncludeIndex = lua.IndexOf(originalIncludeLine, firstIncludeIndexEOL + 1);
                 int nextIncludeIndexEOL = lua.IndexOf("\n", nextIncludeIndex);
-                if(nextIncludeIndexEOL == -1)
+                if (nextIncludeIndexEOL == -1)
+                {
+                    lua = lua.Remove(firstIncludeIndex);
+                }
+                else
+                {
+                    lua = lua.Remove(firstIncludeIndex, nextIncludeIndexEOL - firstIncludeIndex);
+                }
+
+                lua = lua.Insert(firstIncludeIndex, commentedIncludeLine);
+            }
+
+            return lua;
+        }
+
+        static string CompressRequires(string lua)
+        {
+            while (true) // Keep looking for #includes in this file until there's no more to be found
+            {
+                // Looking for something like 
+                // ----#include shared/utils
+                int firstIncludeIndex = lua.IndexOf("----require(");
+                if (firstIncludeIndex == -1)
+                {
+                    break;
+                }
+
+                int firstIncludeIndexEOL = lua.IndexOf("\n", firstIncludeIndex);
+                if (firstIncludeIndexEOL == -1)
+                {
+                    break;
+                }
+                string originalIncludeLine = lua.Substring(firstIncludeIndex, firstIncludeIndexEOL - firstIncludeIndex);
+                string commentedIncludeLine = originalIncludeLine.Replace("----require(", "require(");
+
+                // Find the next matching ----#include.  
+                // Everything in-between can be deleted and collapsed
+                // into a new line such as
+                // #include shared/utils
+                int nextIncludeIndex = lua.IndexOf(originalIncludeLine, firstIncludeIndexEOL + 1);
+                int nextIncludeIndexEOL = lua.IndexOf("\n", nextIncludeIndex);
+                if (nextIncludeIndexEOL == -1)
                 {
                     lua = lua.Remove(firstIncludeIndex);
                 }
@@ -355,7 +393,7 @@ namespace TTSLuaExtractor
                 string commentedIncludeLine;
                 string includeFileName;
                 if (firstIncludeIndexEOL == -1)
-                {
+                {   
                     commentedIncludeLine = lua.Substring(firstIncludeIndex);
                     includeFileName = lua.Substring(firstIncludeIndex + 9);
                 }
@@ -388,7 +426,7 @@ namespace TTSLuaExtractor
                 string sharedFullFile = Path.Combine(sharedFilePath, includeFileName + ".ttslua");
                 FileInfo fi = new FileInfo(sharedFullFile);
                 string sharedFileContents = string.Empty;
-                if ( fi.Exists )
+                if (fi.Exists)
                 {
                     sharedFileContents = File.ReadAllText(sharedFullFile);
                     sharedFileContents = UncompressIncludes(sharedFileContents, newBaseFolder, includePath);
@@ -399,7 +437,99 @@ namespace TTSLuaExtractor
                 }
 
                 // First, remove the "#include file" line
-                if (firstIncludeIndexEOL == -1 )
+                if (firstIncludeIndexEOL == -1)
+                {
+                    lua = lua.Remove(firstIncludeIndex);
+                }
+                else
+                {
+                    lua = lua.Remove(firstIncludeIndex, firstIncludeIndexEOL - firstIncludeIndex);
+                }
+
+                // Then add these:
+                // ----#include file
+                // <contents of file>
+                // ----#include file
+                lua = lua.Insert(firstIncludeIndex, commentedIncludeLine2);
+                lua = lua.Insert(firstIncludeIndex, "\n");
+                lua = lua.Insert(firstIncludeIndex, commentedIncludeLine);
+                lua = lua.Insert(firstIncludeIndex + commentedIncludeLine.Length, sharedFileContents);
+            }
+
+            return lua;
+        }
+
+        static string UncompressRequires(string lua, string baseFolder, string includePath)
+        {
+            // Repeatedly look for "#include file" and replace them with these 3 lines:
+            // ----#include file
+            // <contents of file>
+            // ----#include file
+
+            // First, switch all #include to %include so we don't get confused later when 
+            // it starts inserting "----#include file" lines
+            lua = lua.Replace("require(", "%require(");
+            while (true)
+            {
+                int firstIncludeIndex = lua.IndexOf("%require(");
+                if (firstIncludeIndex == -1)
+                {
+                    break; // Stop if no more #includes to find
+                }
+
+                int firstIncludeIndexEOL = lua.IndexOf("\n", firstIncludeIndex);
+                string commentedIncludeLine;
+                string includeFileName;
+                if (firstIncludeIndexEOL == -1)
+                {
+                    commentedIncludeLine = lua.Substring(firstIncludeIndex);
+                    Regex rx = new Regex(@"%require\(\""(.*)\""\)");
+                    Match match = rx.Match(commentedIncludeLine);
+                    includeFileName = match.Groups[1].Value;
+                }
+                else
+                {
+                    commentedIncludeLine = lua.Substring(firstIncludeIndex, firstIncludeIndexEOL - firstIncludeIndex);
+                    Regex rx = new Regex(@"^require\(\""(.*)\""\)");
+                    Match match = rx.Match(commentedIncludeLine);
+                    includeFileName = match.Groups[1].Value;
+                }
+
+                includeFileName = includeFileName.Replace("\r", "").Replace("\n", "");
+                // Now includeFileName is something like:
+                // shared/util
+
+                commentedIncludeLine = commentedIncludeLine.Replace("\r", "");
+                commentedIncludeLine = commentedIncludeLine.Replace("%require(", "----require(");
+                string commentedIncludeLine2 = commentedIncludeLine;
+                commentedIncludeLine += "\n";
+                // Now commentedIncludeLine should be something like:
+                // ----#include shared/util\n
+
+                string sharedFilePath = Path.Combine(includePath, baseFolder);
+
+                // Extract the base folder from the include file.
+                // For example, if the includeFileName is "shared/util", then
+                // newBaseFolder will be "shared"
+                string newBaseFolder = ExtractBaseFolder(baseFolder, includeFileName);
+
+                // Read the contents of the #included LUA file, but uncompress it
+                // so that'll expand any includes it has it in recursively 
+                string sharedFullFile = Path.Combine(sharedFilePath, includeFileName + ".ttslua");
+                FileInfo fi = new FileInfo(sharedFullFile);
+                string sharedFileContents = string.Empty;
+                if (fi.Exists)
+                {
+                    sharedFileContents = File.ReadAllText(sharedFullFile);
+                    sharedFileContents = UncompressRequires(sharedFileContents, newBaseFolder, includePath);
+                }
+                else
+                {
+                    Console.WriteLine($"Include missing {sharedFullFile} from {commentedIncludeLine}");
+                }
+
+                // First, remove the "#include file" line
+                if (firstIncludeIndexEOL == -1)
                 {
                     lua = lua.Remove(firstIncludeIndex);
                 }
@@ -477,6 +607,7 @@ namespace TTSLuaExtractor
                 Console.WriteLine($"Writing {outputFullPath}");
                 string lua = obj.LuaScript;
                 lua = CompressIncludes(lua);
+                lua = CompressRequires(lua);
                 Directory.CreateDirectory(outputFolder);
                 File.WriteAllText(outputFullPath, lua);
             }
